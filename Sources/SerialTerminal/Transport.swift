@@ -22,6 +22,13 @@ protocol Transport: AnyObject {
     @discardableResult func write(_ data: Data) throws -> Int
     func reconfigure(_ settings: SerialSettings) throws
     func close()
+
+    /// Enumerate serial devices on the far end (SSH only). Completion on main.
+    func discoverSerialDevices(completion: @escaping ([String]) -> Void)
+}
+
+extension Transport {
+    func discoverSerialDevices(completion: @escaping ([String]) -> Void) { completion([]) }
 }
 
 /// How to establish a connection. Built by the GUI or the HTTP API, consumed by
@@ -150,13 +157,45 @@ final class SSHTransport: NSObject, Transport, LocalProcessDelegate {
         return Self.bridgeCommand(dev: params.devicePath, baud: params.baud)
     }
 
-    /// Non-`exec` bridge for running *inside* an existing remote shell — when it
-    /// ends (Ctrl-C / device EOF) the user drops back to the shell rather than the
-    /// SSH session closing. Prefers `socat`; `cat` fallback is read-only.
+    /// Short, single-line bridge to run *inside* the existing remote shell (kept
+    /// brief so an interactive line editor doesn't wrap/mangle it). Ctrl-C returns
+    /// to the shell. Requires `socat` on the remote.
     static func inShellBridge(dev: String, baud: Int) -> String {
-        "stty -F \(dev) \(baud) raw -echo -echoe -echok 2>/dev/null; "
-        + "if command -v socat >/dev/null 2>&1; then socat -,raw,echo=0 \(dev),b\(baud),raw,echo=0; "
-        + "else echo '[socat not found — read-only via cat]'; cat \(dev); fi"
+        "stty -F \(dev) \(baud) raw -echo 2>/dev/null; socat -,raw,echo=0 \(dev),b\(baud),raw,echo=0"
+    }
+
+    /// Out-of-band device discovery: a separate non-interactive `ssh host find …`.
+    /// Avoids the interactive shell's aliases (colorized `ls`), globbing quirks,
+    /// and PTY line-wrap mangling — `find` returns clean full paths on any shell.
+    func discoverSerialDevices(completion: @escaping ([String]) -> Void) {
+        let host = params.host
+        let cmd = "find /dev /dev/serial/by-id -maxdepth 1 "
+            + "\\( -name 'ttyUSB*' -o -name 'ttyACM*' -o -name 'ttyAMA*' "
+            + "-o -name 'tty.usb*' -o -name 'cu.*' \\) 2>/dev/null"
+        DispatchQueue.global(qos: .userInitiated).async {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+            p.arguments = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+                           "-o", "StrictHostKeyChecking=accept-new", host, cmd]
+            let outPipe = Pipe()
+            p.standardOutput = outPipe
+            p.standardError = FileHandle.nullDevice
+            do { try p.run() } catch {
+                DispatchQueue.main.async { completion([]) }; return
+            }
+            DispatchQueue.global().asyncAfter(deadline: .now() + 12) {
+                if p.isRunning { p.terminate() }
+            }
+            let data = outPipe.fileHandleForReading.readDataToEndOfFile()
+            p.waitUntilExit()
+            var seen = Set<String>(); var devs: [String] = []
+            for line in String(decoding: data, as: UTF8.self)
+                .split(whereSeparator: { $0 == "\n" || $0 == "\r" }) {
+                let d = line.trimmingCharacters(in: .whitespaces)
+                if d.hasPrefix("/dev/"), !seen.contains(d) { seen.insert(d); devs.append(d) }
+            }
+            DispatchQueue.main.async { completion(devs) }
+        }
     }
 
     /// Configure the remote line, then bridge stdio <-> device. Prefers `socat`;

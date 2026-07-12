@@ -243,10 +243,6 @@ final class SerialSession: ObservableObject {
         onMain {
             self.rxBytes += data.count
             self.onFeedBytes?(data)
-            if self.captureActive {
-                self.captureBuf += String(decoding: data, as: UTF8.self)
-                if self.captureBuf.contains(self.captureEnd) { self.finishCapture() }
-            }
         }
     }
 
@@ -281,47 +277,12 @@ final class SerialSession: ObservableObject {
 
     // MARK: - Remote device discovery / attach (SSH sessions)
 
-    // Output capture over the live connection (main-thread only).
-    private var captureActive = false
-    private var captureBuf = ""
-    private var captureCompletion: (([String]) -> Void)?
-    private let captureBegin = "__ST_DEVS_BEGIN__"
-    private let captureEnd = "__ST_DEVS_END__"
-
-    /// Enumerate serial devices on the connected (SSH) host by running `ls`
-    /// between unique markers and scraping the output. Completion on main.
+    /// Enumerate serial devices on the connected host (delegated to the transport,
+    /// which runs a clean out-of-band `ssh host find …`). Completion on main.
     func listRemoteDevices(completion: @escaping ([String]) -> Void) {
-        onMain {
-            guard self.connectedNow else { completion([]); return }
-            self.captureBuf = ""
-            self.captureActive = true
-            self.captureCompletion = completion
-            // Linux (ttyUSB/ACM/AMA, serial/by-id) and macOS/BSD (cu.*, tty.usb*).
-            let ls = "ls -1 /dev/serial/by-id/* /dev/ttyUSB* /dev/ttyACM* /dev/ttyAMA* "
-                + "/dev/tty.usb* /dev/cu.usb* /dev/cu.* 2>/dev/null"
-            let line = " printf '\\n\(self.captureBegin)\\n'; \(ls); printf '\(self.captureEnd)\\n'\n"
-            _ = try? self.send(Data(line.utf8))
-            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
-                guard let self, self.captureActive else { return }
-                self.finishCapture()
-            }
-        }
-    }
-
-    private func finishCapture() {
-        captureActive = false
-        let comp = captureCompletion
-        captureCompletion = nil
-        var body = captureBuf
-        if let b = body.range(of: captureBegin) { body = String(body[b.upperBound...]) }
-        if let e = body.range(of: captureEnd) { body = String(body[..<e.lowerBound]) }
-        var seen = Set<String>()
-        var devices: [String] = []
-        for line in body.split(whereSeparator: { $0 == "\n" || $0 == "\r" }) {
-            let d = line.trimmingCharacters(in: .whitespaces)
-            if d.hasPrefix("/dev/"), !seen.contains(d) { seen.insert(d); devices.append(d) }
-        }
-        comp?(devices)
+        portLock.lock(); let t = transport; portLock.unlock()
+        guard let t = t else { completion([]); return }
+        t.discoverSerialDevices(completion: completion)
     }
 
     /// Bridge a remote serial device into the current SSH shell (Ctrl-C returns
