@@ -25,8 +25,10 @@ Run it from this skill directory (or add it to PATH):
 
 | Command | What it does |
 |---|---|
-| `serial status` | JSON: connected?, port, baud, dataBits/parity/stopBits, RX/TX bytes |
+| `serial status` | JSON: connected?, kind (serial/ssh), label, port/host, settings, RX/TX bytes |
 | `serial ports` | list available `/dev/cu.*` devices |
+| `serial sshhosts [filter]` | list `~/.ssh/config` host aliases (optional substring filter) |
+| `serial ssh <host> [dev] [baud]` | connect over SSH; with `dev` (e.g. `/dev/ttyUSB0`) bridge that remote serial device, else open a login shell |
 | `serial read` | print serial data received **since your last read** (incremental) |
 | `serial read --all` | print everything in the retained buffer (last ~1 MiB) |
 | `serial watch [secs]` | stream new data live until the timeout (default 3600s) |
@@ -38,6 +40,16 @@ Run it from this skill directory (or add it to PATH):
 
 `parity` is `none`, `even`, or `odd`. The API port can be overridden with the
 `SERIAL_API_PORT` env var.
+
+### SSH connections (remote boxes / remote serial devices)
+The app can also connect by running the system `ssh`, so it uses the user's
+`~/.ssh/config` (incl. `Include`s), keys, and agent automatically. Two modes:
+- **Shell**: `serial ssh pos_scangle` → interactive remote shell.
+- **Attach remote device**: `serial ssh pos_scangle /dev/ttyUSB0 9600` → bridges
+  that remote serial device (e.g. a scale) to the terminal, so `serial read` /
+  `serial watch` tail the device's stream from anywhere on the fleet.
+
+Use `serial sshhosts tora` to find matching host aliases before connecting.
 
 ## Typical workflow
 1. `serial status` — is it connected, and to what?

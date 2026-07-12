@@ -17,6 +17,8 @@ final class SerialSession: ObservableObject {
     @Published var txBytes: Int = 0
     @Published var localEcho: Bool = false     // device usually echoes; off avoids doubles
     @Published var httpPort: UInt16 = 8765
+    @Published var connectionLabel: String = "" // e.g. "ssh pos_scangle · /dev/ttyUSB0"; drives window title
+    @Published var connectionIsSerial = false   // true for local serial (enables Send Size / Auto)
     @Published var termCols: Int = 80          // live emulator size (from SwiftTerm)
     @Published var termRows: Int = 24
     @Published var autoSyncSize: Bool = true   // auto-send stty size on connect/resize
@@ -30,7 +32,7 @@ final class SerialSession: ObservableObject {
     var onFeedText: ((String) -> Void)?        // local banners (connect/disconnect…)
     var onClear: (() -> Void)?                 // reset the terminal
 
-    private let port = SerialPort()
+    private var transport: Transport?
     private let portLock = NSLock()
 
     // Received-byte ring buffer with a monotonic offset for incremental /read.
@@ -45,12 +47,19 @@ final class SerialSession: ObservableObject {
     private let stateLock = NSLock()
     private var _connected = false
     private var _connSettings = SerialSettings()
-    private var _connPort: String? = nil
+    private var _connKind = "none"             // "serial" | "ssh" | "none"
+    private var _connLabel = ""
+    private var _connPort: String? = nil       // serial device path (nil for ssh)
+    private var _connHost: String? = nil       // ssh host (nil for serial)
+    private var _needsManualWinSize = true
     private var authTxBytes = 0
 
     struct StatusSnapshot {
         var connected: Bool
+        var kind: String
+        var label: String
         var port: String?
+        var host: String?
         var settings: SerialSettings
         var rxBytes: Int
         var txBytes: Int
@@ -59,22 +68,20 @@ final class SerialSession: ObservableObject {
     /// Thread-safe, always-current connection status for the control API.
     func statusSnapshot() -> StatusSnapshot {
         stateLock.lock()
-        let snap = StatusSnapshot(connected: _connected, port: _connPort,
-                                  settings: _connSettings, rxBytes: totalReceived(),
-                                  txBytes: authTxBytes)
+        let snap = StatusSnapshot(connected: _connected, kind: _connKind, label: _connLabel,
+                                  port: _connPort, host: _connHost, settings: _connSettings,
+                                  rxBytes: totalReceived(), txBytes: authTxBytes)
         stateLock.unlock()
         return snap
     }
 
-    /// Authoritative "is the port open right now?" for API guards.
+    /// Authoritative "is the connection open right now?" for API guards.
     var connectedNow: Bool {
         stateLock.lock(); defer { stateLock.unlock() }
         return _connected
     }
 
     init() {
-        port.onData = { [weak self] data in self?.handleReceived(data) }
-        port.onClosed = { [weak self] reason in self?.handlePortClosed(reason) }
         refreshPorts()
     }
 
@@ -92,40 +99,69 @@ final class SerialSession: ObservableObject {
 
     // MARK: - Connect / disconnect / reconfigure
 
-    /// Open the given port. Throws on failure; safe to call from any thread.
+    /// Convenience for a local serial connection (used by the GUI).
     func connect(port path: String, settings newSettings: SerialSettings) throws {
+        try connect(.serial(path: path, settings: newSettings))
+    }
+
+    /// Open any transport described by `spec`. Throws on failure; any thread.
+    func connect(_ spec: ConnectionSpec) throws {
         portLock.lock()
         defer { portLock.unlock() }
-        try port.open(path: path, settings: newSettings)
+
+        // Replace any existing connection.
+        if let old = transport { old.close(); transport = nil }
+
+        let t = makeTransport(spec)
+        t.onData = { [weak self] data in self?.handleReceived(data) }
+        t.onClosed = { [weak self] reason in self?.handlePortClosed(reason) }
+        try t.open()
+        transport = t
 
         bufLock.lock()
         rxBuffer.removeAll(keepingCapacity: true)
         baseOffset = 0
         bufLock.unlock()
 
+        // Serial-specific settings/port; ssh host; common label.
+        var newSettings = _connSettings
+        var portPath: String? = nil
+        var host: String? = nil
+        switch spec {
+        case .serial(let path, let s): newSettings = s; portPath = path
+        case .ssh(let p): newSettings.baud = p.baud; host = p.host
+        }
+
         stateLock.lock()
         _connected = true
-        _connPort = path
+        _connKind = spec.kind
+        _connLabel = t.label
+        _connPort = portPath
+        _connHost = host
         _connSettings = newSettings
+        _needsManualWinSize = t.needsManualWindowSize
         authTxBytes = 0
         stateLock.unlock()
 
-        let banner = "[ connected \(path) @ \(newSettings.baud) "
-            + "\(newSettings.dataBits)\(newSettings.parity.rawValue.prefix(1).uppercased())"
-            + "\(newSettings.stopBits) ]"
+        let label = t.label
+        let manualWin = t.needsManualWindowSize
+        let isSerial = spec.kind == "serial"
         onMain {
             self.settings = newSettings
-            self.selectedPort = path
-            self.connectedPort = path
+            if let portPath { self.selectedPort = portPath }
+            self.connectedPort = portPath ?? host
             self.isConnected = true
             self.lastError = nil
             self.rxBytes = 0
             self.txBytes = 0
-            self.feedText(banner)
+            self.connectionLabel = label
+            self.connectionIsSerial = isSerial
+            self.feedText("[ connected \(label) ]")
         }
 
-        // Sync the remote TTY size once things settle (assumes a shell prompt).
-        if autoSyncSize {
+        // Serial links carry no window-size signal — push it via stty once things
+        // settle. SSH negotiates its PTY size itself, so skip it there.
+        if autoSyncSize && manualWin {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
                 guard let self, self.connectedNow, self.autoSyncSize else { return }
                 self.sendWindowSize()
@@ -133,24 +169,42 @@ final class SerialSession: ObservableObject {
         }
     }
 
+    private func makeTransport(_ spec: ConnectionSpec) -> Transport {
+        switch spec {
+        case .serial(let path, let s):
+            return SerialTransport(path: path, settings: s)
+        case .ssh(let p):
+            return SSHTransport(params: p, windowSize: { [weak self] in
+                (cols: self?.termCols ?? 80, rows: self?.termRows ?? 24)
+            })
+        }
+    }
+
     func disconnect() {
         portLock.lock()
-        port.close()
+        transport?.close()
+        transport = nil
         portLock.unlock()
-        stateLock.lock(); _connected = false; _connPort = nil; stateLock.unlock()
+        stateLock.lock()
+        _connected = false; _connKind = "none"; _connLabel = ""
+        _connPort = nil; _connHost = nil
+        stateLock.unlock()
         onMain {
             self.isConnected = false
             self.connectedPort = nil
+            self.connectionLabel = ""
+            self.connectionIsSerial = false
             self.feedText("[ disconnected ]")
         }
     }
 
-    /// Change parameters on the live connection (no drop).
+    /// Change parameters on the live connection (no drop). Serial only.
     func reconfigure(_ newSettings: SerialSettings) throws {
         portLock.lock()
         defer { portLock.unlock() }
-        try port.reconfigure(settings: newSettings)
-        stateLock.lock(); _connSettings = newSettings; stateLock.unlock()
+        guard let t = transport, t.supportsLineSettings else { return }
+        try t.reconfigure(newSettings)
+        stateLock.lock(); _connSettings = newSettings; _connLabel = t.label; stateLock.unlock()
         onMain {
             self.settings = newSettings
             self.feedText("[ reconfigured @ \(newSettings.baud) ]")
@@ -159,12 +213,13 @@ final class SerialSession: ObservableObject {
 
     // MARK: - Send
 
-    /// Write raw bytes to the port and (optionally) echo them into the terminal.
+    /// Write raw bytes to the transport and (optionally) echo them into the terminal.
     @discardableResult
     func send(_ data: Data) throws -> Int {
         portLock.lock()
         defer { portLock.unlock() }
-        let n = try port.write(data)
+        guard let t = transport else { throw SerialError.notOpen }
+        let n = try t.write(data)
         stateLock.lock(); authTxBytes += n; stateLock.unlock()
         onMain {
             self.txBytes += n
@@ -196,6 +251,8 @@ final class SerialSession: ObservableObject {
         onMain {
             self.isConnected = false
             self.connectedPort = nil
+            self.connectionLabel = ""
+            self.connectionIsSerial = false
             self.lastError = reason
             self.feedText("[ port closed\(reason.map { ": \($0)" } ?? "") ]")
         }
@@ -235,6 +292,8 @@ final class SerialSession: ObservableObject {
     /// HISTCONTROL=ignorespace keep it out of history.
     func sendWindowSize() {
         guard connectedNow else { return }
+        stateLock.lock(); let manual = _needsManualWinSize; stateLock.unlock()
+        guard manual else { return }   // SSH negotiates its own PTY size
         let size = currentTermSize?() ?? (cols: termCols, rows: termRows)
         onMain { self.termCols = size.cols; self.termRows = size.rows }
         let cmd = " stty rows \(size.rows) cols \(size.cols)\n"

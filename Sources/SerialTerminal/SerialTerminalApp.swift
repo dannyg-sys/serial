@@ -1,7 +1,22 @@
 import SwiftUI
 import AppKit
 
+/// Entry point. A `--list-ssh-hosts` flag prints discovered ssh-config hosts and
+/// exits before any window or control server starts (safe to run alongside a
+/// running instance); otherwise the GUI app launches normally.
 @main
+enum Main {
+    static func main() {
+        if CommandLine.arguments.contains("--list-ssh-hosts") {
+            for h in SSHConfig.discoverHosts() {
+                print(h.alias + (h.subtitle.map { "\t\($0)" } ?? ""))
+            }
+            return
+        }
+        SerialTerminalApp.main()
+    }
+}
+
 struct SerialTerminalApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 

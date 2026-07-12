@@ -88,6 +88,12 @@ final class ControlServer {
         case ("GET", "/ports"):
             return json(["ports": SerialPort.availablePorts()])
 
+        case ("GET", "/sshhosts"):
+            let hosts = SSHConfig.discoverHosts().map { h -> [String: Any] in
+                ["alias": h.alias, "user": h.user ?? NSNull(), "hostName": h.hostName ?? NSNull()]
+            }
+            return json(["hosts": hosts])
+
         case ("GET", "/status"):
             return json(statusDict())
 
@@ -141,7 +147,7 @@ final class ControlServer {
             payload = req.body      // raw body = raw bytes
         }
 
-        guard session.isConnected else {
+        guard session.connectedNow else {
             return ("409 Conflict", "application/json",
                     Data(#"{"error":"not connected"}"#.utf8))
         }
@@ -156,11 +162,41 @@ final class ControlServer {
 
     private func doConnect(_ req: HTTPRequest) -> (String, String, Data) {
         let obj = (try? JSONSerialization.jsonObject(with: req.body)) as? [String: Any] ?? [:]
+        let type = (obj["type"] as? String)?.lowercased() ?? "serial"
+
+        func baud(_ dflt: Int) -> Int {
+            if let b = obj["baud"] as? Int { return b }
+            if let b = obj["baud"] as? String, let bi = Int(b) { return bi }
+            return dflt
+        }
+
+        if type == "ssh" {
+            var p = SSHParams()
+            p.host = (obj["host"] as? String) ?? ""
+            if let dev = obj["device"] as? String, !dev.isEmpty {
+                p.devicePath = dev; p.attachDevice = true
+            }
+            if let attach = obj["attachDevice"] as? Bool { p.attachDevice = attach }
+            p.baud = baud(p.baud)
+            if let cmd = obj["command"] as? String { p.customCommand = cmd }
+            guard !p.host.isEmpty else {
+                return ("400 Bad Request", "application/json",
+                        Data(#"{"error":"no ssh host"}"#.utf8))
+            }
+            do {
+                try session.connect(.ssh(p))
+                return json(["ok": true, "connected": true, "kind": "ssh", "host": p.host,
+                             "device": p.attachDevice ? p.devicePath : NSNull()])
+            } catch {
+                return ("500 Internal Server Error", "application/json",
+                        Data("{\"error\":\(jsonString("\(error)"))}".utf8))
+            }
+        }
+
+        // Serial (default).
         var s = session.settings
-        if let p = obj["port"] as? String { session.selectedPort = p }
         let path = (obj["port"] as? String) ?? session.selectedPort
-        if let b = obj["baud"] as? Int { s.baud = b }
-        else if let b = obj["baud"] as? String, let bi = Int(b) { s.baud = bi }
+        s.baud = baud(s.baud)
         if let d = obj["dataBits"] as? Int { s.dataBits = d }
         if let st = obj["stopBits"] as? Int { s.stopBits = st }
         if let par = obj["parity"] as? String, let pv = Parity(rawValue: par.lowercased()) { s.parity = pv }
@@ -170,8 +206,8 @@ final class ControlServer {
                     Data(#"{"error":"no port specified"}"#.utf8))
         }
         do {
-            try session.connect(port: path, settings: s)
-            return json(["ok": true, "connected": true, "port": path, "baud": s.baud])
+            try session.connect(.serial(path: path, settings: s))
+            return json(["ok": true, "connected": true, "kind": "serial", "port": path, "baud": s.baud])
         } catch {
             return ("500 Internal Server Error", "application/json",
                     Data("{\"error\":\(jsonString("\(error)"))}".utf8))
@@ -179,16 +215,20 @@ final class ControlServer {
     }
 
     private func statusDict() -> [String: Any] {
-        [
-            "connected": session.isConnected,
-            "port": session.connectedPort ?? NSNull(),
-            "baud": session.settings.baud,
-            "dataBits": session.settings.dataBits,
-            "parity": session.settings.parity.rawValue,
-            "stopBits": session.settings.stopBits,
-            "rxBytes": session.rxBytes,
-            "txBytes": session.txBytes,
-            "totalReceived": session.totalReceived(),
+        let s = session.statusSnapshot()
+        return [
+            "connected": s.connected,
+            "kind": s.kind,
+            "label": s.label,
+            "port": s.port ?? NSNull(),
+            "host": s.host ?? NSNull(),
+            "baud": s.settings.baud,
+            "dataBits": s.settings.dataBits,
+            "parity": s.settings.parity.rawValue,
+            "stopBits": s.settings.stopBits,
+            "rxBytes": s.rxBytes,
+            "txBytes": s.txBytes,
+            "totalReceived": s.rxBytes,
             "httpPort": Int(session.httpPort),
         ]
     }
@@ -217,11 +257,13 @@ final class ControlServer {
         Serial Terminal control API (loopback only)
 
           GET  /ports            list /dev/cu.* devices
+          GET  /sshhosts         list ~/.ssh/config host aliases
           GET  /status           connection + settings + byte counters
           GET  /read?offset=N    received bytes since byte offset N
           POST /write            body: raw bytes, or JSON {text,newline,base64}
-          POST /connect          JSON {port,baud,dataBits,parity,stopBits}
-          POST /disconnect       close the port
+          POST /connect          serial: {port,baud,dataBits,parity,stopBits}
+                                 ssh:    {type:"ssh",host,device?,baud?,command?}
+          POST /disconnect       close the connection
 
         Use the `serial` skill helper instead of raw curl when possible.
         """

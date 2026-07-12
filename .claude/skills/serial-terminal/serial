@@ -16,6 +16,10 @@ serial — control the SerialTerminal.app over its loopback API
 
   serial status              connection state, port, baud, byte counters
   serial ports               list available /dev/cu.* devices
+  serial sshhosts [filter]   list ~/.ssh/config host aliases (optional substring filter)
+  serial ssh <host> [dev] [baud]
+                             connect over SSH; with <dev> (e.g. /dev/ttyUSB0)
+                             bridge that remote serial device, else a login shell
   serial read [--all]        print serial data received since last read
                              (--all: from the start of the retained buffer)
   serial watch [secs]        continuously print new data (default 3600s)
@@ -48,6 +52,34 @@ case "$cmd" in
 
   status)  require_app; _get /status; echo ;;
   ports)   require_app; _get /ports;  echo ;;
+
+  sshhosts)
+    require_app
+    filter="${1:-}"
+    resp="$(_get /sshhosts)"
+    python3 - "$resp" "$filter" <<'PY'
+import json, sys
+data = json.loads(sys.argv[1])
+filt = (sys.argv[2] if len(sys.argv) > 2 else "").lower()
+for h in data.get("hosts", []):
+    alias = h.get("alias", "")
+    sub = "@".join(x for x in [h.get("user"), h.get("hostName")] if x)
+    line = f"{alias}\t{sub}" if sub else alias
+    if not filt or filt in alias.lower() or filt in sub.lower():
+        print(line)
+PY
+    ;;
+
+  ssh)
+    require_app
+    host="${1:?usage: serial ssh <host> [device] [baud]}"
+    dev="${2:-}"; baud="${3:-9600}"
+    if [[ -n "$dev" ]]; then
+      body="$(python3 -c 'import json,sys;print(json.dumps({"type":"ssh","host":sys.argv[1],"device":sys.argv[2],"baud":int(sys.argv[3])}))' "$host" "$dev" "$baud")"
+    else
+      body="$(python3 -c 'import json,sys;print(json.dumps({"type":"ssh","host":sys.argv[1]}))' "$host")"
+    fi
+    _post /connect -H 'Content-Type: application/json' -d "$body"; echo ;;
 
   read)
     require_app
