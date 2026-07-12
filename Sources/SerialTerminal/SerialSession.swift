@@ -277,11 +277,11 @@ final class SerialSession: ObservableObject {
 
     // MARK: - Remote device discovery / attach (SSH sessions)
 
-    /// Enumerate serial devices on the connected host (delegated to the transport,
-    /// which runs a clean out-of-band `ssh host find …`). Completion on main.
-    func listRemoteDevices(completion: @escaping ([String]) -> Void) {
+    /// Probe the connected host for serial devices + socat (delegated to the
+    /// transport, which runs a clean out-of-band `ssh host find …`). On main.
+    func listRemoteDevices(completion: @escaping (RemoteScan) -> Void) {
         portLock.lock(); let t = transport; portLock.unlock()
-        guard let t = t else { completion([]); return }
+        guard let t = t else { completion(RemoteScan(devices: [], hasSocat: false)); return }
         t.discoverSerialDevices(completion: completion)
     }
 

@@ -11,6 +11,7 @@ struct AttachDeviceSheet: View {
     @State private var baud = "9600"
     @State private var scanning = false
     @State private var scanned = false
+    @State private var hasSocat = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -49,9 +50,16 @@ struct AttachDeviceSheet: View {
             }
 
             if scanned && devices.isEmpty {
-                Text("No serial devices found (ttyUSB*/ttyACM*/serial-by-id on Linux, "
-                     + "cu.*/tty.usb* on macOS).")
+                Text("No serial adapters found (ttyUSB*/ttyACM*/serial-by-id on Linux, "
+                     + "cu.usb*/tty.usb* on macOS).")
                     .font(.caption).foregroundStyle(.orange)
+            }
+            if scanned && !hasSocat {
+                Label("socat not found on the host — will bridge with `cat` "
+                      + "(read works; install socat for full raw I/O).",
+                      systemImage: "exclamationmark.triangle")
+                    .font(.caption).foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             HStack {
@@ -70,11 +78,12 @@ struct AttachDeviceSheet: View {
     private func discover() {
         guard session.isConnected else { return }
         scanning = true
-        session.listRemoteDevices { found in
-            devices = found
+        session.listRemoteDevices { scan in
+            devices = scan.devices
+            hasSocat = scan.hasSocat
             scanning = false
             scanned = true
-            if let first = found.first { device = first }
+            if let first = scan.devices.first { device = first }
         }
     }
 

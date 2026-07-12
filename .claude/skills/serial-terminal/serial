@@ -183,6 +183,8 @@ import json, sys
 d = json.loads(sys.argv[1])
 if d.get("error"): sys.exit(f'error: {d["error"]}')
 for dev in d.get("devices", []): print(dev)
+if not d.get("hasSocat", True):
+    sys.stderr.write("note: socat not found on host — attach uses cat fallback\n")
 PY
     ;;
 

@@ -23,16 +23,24 @@ protocol Transport: AnyObject {
     func reconfigure(_ settings: SerialSettings) throws
     func close()
 
-    /// Enumerate serial devices on the far end (SSH only). Completion on main.
-    func discoverSerialDevices(completion: @escaping ([String]) -> Void)
+    /// Probe the far end for serial devices + socat (SSH only). Completion on main.
+    func discoverSerialDevices(completion: @escaping (RemoteScan) -> Void)
 }
 
 extension Transport {
-    func discoverSerialDevices(completion: @escaping ([String]) -> Void) { completion([]) }
+    func discoverSerialDevices(completion: @escaping (RemoteScan) -> Void) {
+        completion(RemoteScan(devices: [], hasSocat: false))
+    }
 }
 
 /// How to establish a connection. Built by the GUI or the HTTP API, consumed by
 /// `SerialSession.connect`.
+/// Result of probing a remote host for serial devices.
+struct RemoteScan {
+    var devices: [String]
+    var hasSocat: Bool
+}
+
 enum ConnectionSpec {
     case serial(path: String, settings: SerialSettings)
     case ssh(SSHParams)
@@ -170,11 +178,15 @@ final class SSHTransport: NSObject, Transport, LocalProcessDelegate {
     /// Out-of-band device discovery: a separate non-interactive `ssh host find …`.
     /// Avoids the interactive shell's aliases (colorized `ls`), globbing quirks,
     /// and PTY line-wrap mangling — `find` returns clean full paths on any shell.
-    func discoverSerialDevices(completion: @escaping ([String]) -> Void) {
+    func discoverSerialDevices(completion: @escaping (RemoteScan) -> Void) {
         let host = params.host
-        let cmd = "find /dev /dev/serial/by-id -maxdepth 1 "
-            + "\\( -name 'ttyUSB*' -o -name 'ttyACM*' -o -name 'ttyAMA*' "
-            + "-o -name 'tty.usb*' -o -name 'cu.*' \\) 2>/dev/null"
+        // Real serial adapters only (usbserial/usbmodem/ttyUSB/ttyACM/ttyAMA and
+        // all /dev/serial/by-id symlinks) — skip cu.Bluetooth/debug-console noise.
+        // Also report whether `socat` is available on the host.
+        let cmd = "find /dev/serial/by-id -maxdepth 1 -type l 2>/dev/null; "
+            + "find /dev -maxdepth 1 \\( -name 'ttyUSB*' -o -name 'ttyACM*' -o -name 'ttyAMA*' "
+            + "-o -name 'cu.usb*' -o -name 'tty.usb*' \\) 2>/dev/null; "
+            + "command -v socat >/dev/null 2>&1 && echo __HAS_SOCAT__"
         DispatchQueue.global(qos: .userInitiated).async {
             let p = Process()
             p.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
@@ -184,20 +196,23 @@ final class SSHTransport: NSObject, Transport, LocalProcessDelegate {
             p.standardOutput = outPipe
             p.standardError = FileHandle.nullDevice
             do { try p.run() } catch {
-                DispatchQueue.main.async { completion([]) }; return
+                DispatchQueue.main.async { completion(RemoteScan(devices: [], hasSocat: false)) }
+                return
             }
             DispatchQueue.global().asyncAfter(deadline: .now() + 12) {
                 if p.isRunning { p.terminate() }
             }
             let data = outPipe.fileHandleForReading.readDataToEndOfFile()
             p.waitUntilExit()
-            var seen = Set<String>(); var devs: [String] = []
+            var seen = Set<String>(); var devs: [String] = []; var hasSocat = false
             for line in String(decoding: data, as: UTF8.self)
                 .split(whereSeparator: { $0 == "\n" || $0 == "\r" }) {
                 let d = line.trimmingCharacters(in: .whitespaces)
+                if d == "__HAS_SOCAT__" { hasSocat = true; continue }
                 if d.hasPrefix("/dev/"), !seen.contains(d) { seen.insert(d); devs.append(d) }
             }
-            DispatchQueue.main.async { completion(devs) }
+            let scan = RemoteScan(devices: devs, hasSocat: hasSocat)
+            DispatchQueue.main.async { completion(scan) }
         }
     }
 

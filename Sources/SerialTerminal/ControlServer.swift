@@ -133,10 +133,10 @@ final class ControlServer {
                 return json(["devices": [], "error": "not an ssh session"])
             }
             let sem = DispatchSemaphore(value: 0)
-            var result: [String] = []
-            session.listRemoteDevices { d in result = d; sem.signal() }
-            _ = sem.wait(timeout: .now() + 4)
-            return json(["devices": result])
+            var result = RemoteScan(devices: [], hasSocat: false)
+            session.listRemoteDevices { scan in result = scan; sem.signal() }
+            _ = sem.wait(timeout: .now() + 14)
+            return json(["devices": result.devices, "hasSocat": result.hasSocat])
 
         case ("POST", "/attach"):
             let obj = (try? JSONSerialization.jsonObject(with: req.body)) as? [String: Any] ?? [:]

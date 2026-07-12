@@ -5,11 +5,17 @@ struct ContentView: View {
     @State private var showOpen = false
     @State private var showAttach = false
 
+    // Matches SwiftTerm's nativeBackgroundColor so the inset margin blends in.
+    static let terminalBackground = Color(.sRGB, red: 0.07, green: 0.08, blue: 0.11, opacity: 1)
+
     var body: some View {
         VStack(spacing: 0) {
             controlBar
             Divider()
             SwiftTermView(session: session)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+                .background(Self.terminalBackground)
                 .frame(minWidth: 640, minHeight: 360)
             Divider()
             statusBar
