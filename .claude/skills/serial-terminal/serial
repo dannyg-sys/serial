@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+# serial — talk to the SerialTerminal.app control API (loopback HTTP).
+# The GUI app owns the serial port; this shares the same open connection.
+set -euo pipefail
+
+HOST="127.0.0.1"
+PORT="${SERIAL_API_PORT:-8765}"
+BASE="http://${HOST}:${PORT}"
+
+# Track the read offset between `read`/`watch` invocations in this shell tree.
+OFFSET_FILE="${TMPDIR:-/tmp}/serial_offset_${PORT}"
+
+usage() {
+  cat <<'EOF'
+serial — control the SerialTerminal.app over its loopback API
+
+  serial status              connection state, port, baud, byte counters
+  serial ports               list available /dev/cu.* devices
+  serial read [--all]        print serial data received since last read
+                             (--all: from the start of the retained buffer)
+  serial watch [secs]        continuously print new data (default 3600s)
+  serial send  <text>        send text + newline (LF) to the port
+  serial sendraw <text>      send text with NO trailing newline
+  serial hex   <hexbytes>    send raw bytes, e.g. `serial hex 01 ff 0d`
+  serial connect <port> [baud] [databits] [parity] [stopbits]
+                             open/reconfigure the port (parity: none|even|odd)
+  serial disconnect          close the port
+
+Env: SERIAL_API_PORT (default 8765)
+EOF
+}
+
+_get()  { curl -fsS "${BASE}$1"; }
+_post() { curl -fsS -X POST "${BASE}$1" "${@:2}"; }
+
+require_app() {
+  if ! curl -fsS -m 2 "${BASE}/status" >/dev/null 2>&1; then
+    echo "error: SerialTerminal.app is not reachable at ${BASE}" >&2
+    echo "       launch the app (open SerialTerminal.app) first." >&2
+    exit 1
+  fi
+}
+
+cmd="${1:-status}"; shift || true
+
+case "$cmd" in
+  -h|--help|help) usage ;;
+
+  status)  require_app; _get /status; echo ;;
+  ports)   require_app; _get /ports;  echo ;;
+
+  read)
+    require_app
+    local_offset=0
+    if [[ "${1:-}" == "--all" ]]; then
+      local_offset=0
+    elif [[ -f "$OFFSET_FILE" ]]; then
+      local_offset="$(cat "$OFFSET_FILE")"
+    fi
+    resp="$(_get "/read?offset=${local_offset}")"
+    # Extract text + nextOffset with python for safe JSON handling.
+    python3 - "$resp" "$OFFSET_FILE" <<'PY'
+import json, sys
+resp, off_file = sys.argv[1], sys.argv[2]
+d = json.loads(resp)
+sys.stdout.write(d.get("text", ""))
+open(off_file, "w").write(str(d.get("nextOffset", 0)))
+PY
+    ;;
+
+  watch)
+    require_app
+    secs="${1:-3600}"
+    end=$(( $(date +%s) + secs ))
+    # Start from the current end so we only show NEW data.
+    resp="$(_get "/read?offset=999999999999")"
+    off="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["nextOffset"])' "$resp")"
+    echo "watching ${BASE} from offset ${off} (Ctrl-C to stop)…" >&2
+    while [[ $(date +%s) -lt $end ]]; do
+      resp="$(_get "/read?offset=${off}")"
+      python3 - "$resp" <<'PY'
+import json,sys
+d=json.loads(sys.argv[1])
+t=d.get("text","")
+if t: sys.stdout.write(t); sys.stdout.flush()
+PY
+      off="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["nextOffset"])' "$resp")"
+      sleep 0.3
+    done
+    ;;
+
+  send)
+    require_app
+    text="$*"
+    _post /write -H 'Content-Type: application/json' \
+      -d "$(python3 -c 'import json,sys;print(json.dumps({"text":sys.argv[1],"newline":"lf"}))' "$text")"
+    echo ;;
+
+  sendraw)
+    require_app
+    text="$*"
+    _post /write -H 'Content-Type: application/json' \
+      -d "$(python3 -c 'import json,sys;print(json.dumps({"text":sys.argv[1]}))' "$text")"
+    echo ;;
+
+  hex)
+    require_app
+    b64="$(python3 -c 'import base64,sys;print(base64.b64encode(bytes(int(x,16) for x in sys.argv[1:])).decode())' "$@")"
+    _post /write -H 'Content-Type: application/json' -d "{\"base64\":\"${b64}\"}"
+    echo ;;
+
+  connect)
+    require_app
+    port="${1:?usage: serial connect <port> [baud] [databits] [parity] [stopbits]}"
+    baud="${2:-9600}"; databits="${3:-8}"; parity="${4:-none}"; stopbits="${5:-1}"
+    _post /connect -H 'Content-Type: application/json' \
+      -d "{\"port\":\"${port}\",\"baud\":${baud},\"dataBits\":${databits},\"parity\":\"${parity}\",\"stopBits\":${stopbits}}"
+    echo ;;
+
+  disconnect)
+    require_app
+    _post /disconnect; echo ;;
+
+  *) echo "unknown command: $cmd" >&2; usage; exit 1 ;;
+esac

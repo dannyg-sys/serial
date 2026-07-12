@@ -1,0 +1,65 @@
+---
+name: serial-terminal
+description: Observe and drive a live serial connection owned by SerialTerminal.app. Use when the user is working with a serial device (UART, modem, microcontroller, USB-serial adapter) and wants Claude to see incoming serial data, send commands/bytes, or open/close/reconfigure the port while the GUI terminal is running. Triggers on "what is the serial port showing", "send this to the serial device", "watch the serial output", "connect to /dev/cu.*", AT commands, baud rate.
+---
+
+# Serial Terminal skill
+
+SerialTerminal.app (a native macOS SwiftUI app in this repo) owns the serial
+port and exposes a **loopback HTTP API on `127.0.0.1:8765`**. A serial device can
+only be opened by one process, so you never open `/dev/cu.*` directly — you share
+the app's open connection through this API. The `serial` helper script in this
+skill directory wraps it.
+
+## Prerequisites
+The app must be running. If `serial status` reports it's unreachable, tell the
+user to launch it: `open SerialTerminal.app` (or `swift run SerialTerminal` from
+the repo during dev). Do not try to open the serial device yourself.
+
+## The `serial` helper
+Run it from this skill directory (or add it to PATH):
+
+```
+.claude/skills/serial-terminal/serial <command>
+```
+
+| Command | What it does |
+|---|---|
+| `serial status` | JSON: connected?, port, baud, dataBits/parity/stopBits, RX/TX bytes |
+| `serial ports` | list available `/dev/cu.*` devices |
+| `serial read` | print serial data received **since your last read** (incremental) |
+| `serial read --all` | print everything in the retained buffer (last ~1 MiB) |
+| `serial watch [secs]` | stream new data live until the timeout (default 3600s) |
+| `serial send <text>` | send text **+ LF newline** (typical for line-based protocols / AT) |
+| `serial sendraw <text>` | send text with **no** trailing newline |
+| `serial hex 01 ff 0d` | send raw bytes given as hex |
+| `serial connect <port> [baud] [databits] [parity] [stopbits]` | open / reconfigure |
+| `serial disconnect` | close the port |
+
+`parity` is `none`, `even`, or `odd`. The API port can be overridden with the
+`SERIAL_API_PORT` env var.
+
+## Typical workflow
+1. `serial status` — is it connected, and to what?
+2. If not connected, either ask the user to connect in the GUI, or do it:
+   `serial connect /dev/cu.usbserial-1420 115200`
+3. Send a command and read the reply:
+   ```
+   serial send "AT"
+   sleep 1
+   serial read
+   ```
+4. To follow a chatty device live: `serial watch 30`.
+
+## Notes for Claude
+- `serial read` is **incremental** — it remembers an offset per API port in
+  `$TMPDIR/serial_offset_<port>`, so repeated calls only show new data. Use
+  `--all` to re-dump the buffer from the start.
+- After sending a command, give the device a moment (`sleep 0.5`–`2`) before
+  `serial read`, since replies arrive asynchronously.
+- Received data is decoded as UTF-8 for display; for binary protocols inspect the
+  raw bytes via `serial read` output or the `base64` field of `GET /read`.
+- The GUI reflects everything you do (and vice-versa) — you and the user share the
+  one open connection.
+- Raw API is available if you need it: `GET /ports /status /read?offset=N`,
+  `POST /write /connect /disconnect`. See `GET /` for the built-in help.
