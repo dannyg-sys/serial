@@ -5,6 +5,8 @@ set -euo pipefail
 
 HOST="127.0.0.1"
 PORT="${SERIAL_API_PORT:-8765}"
+# `serial --port N <cmd>` targets a specific window (each window = its own port)
+if [[ "${1:-}" == "--port" && -n "${2:-}" ]]; then PORT="$2"; shift 2; fi
 BASE="http://${HOST}:${PORT}"
 
 # Track the read offset between `read`/`watch` invocations in this shell tree.
@@ -14,12 +16,16 @@ usage() {
   cat <<'EOF'
 serial — control the SerialTerminal.app over its loopback API
 
+  serial sessions            list open app windows (each is its own port)
+  serial --port N <cmd>      target a specific window (e.g. serial --port 8766 watch)
   serial status              connection state, port, baud, byte counters
   serial ports               list available /dev/cu.* devices
   serial sshhosts [filter]   list ~/.ssh/config host aliases (optional substring filter)
   serial ssh <host> [dev] [baud]
                              connect over SSH; with <dev> (e.g. /dev/ttyUSB0)
                              bridge that remote serial device, else a login shell
+  serial rdevices            (in an SSH shell) list the remote host's serial devices
+  serial attach <dev> [baud] (in an SSH shell) bridge a remote device into the terminal
   serial read [--all]        print serial data received since last read
                              (--all: from the start of the retained buffer)
   serial watch [secs]        continuously print new data (default 3600s)
@@ -52,6 +58,22 @@ case "$cmd" in
 
   status)  require_app; _get /status; echo ;;
   ports)   require_app; _get /ports;  echo ;;
+
+  sessions)
+    # Any live window's /sessions returns the full registry — scan for one.
+    for p in $(seq 8765 8775); do
+      resp="$(curl -fsS -m1 "http://${HOST}:$p/sessions" 2>/dev/null)" || continue
+      python3 - "$resp" <<'PY'
+import json, sys
+d = json.loads(sys.argv[1])
+for s in d.get("sessions", []):
+    mark = "●" if s["connected"] else "○"
+    print(f'{mark} port {s["port"]}\t{s["label"]}')
+PY
+      exit 0
+    done
+    echo "no SerialTerminal windows found (scanned 8765-8775)" >&2; exit 1
+    ;;
 
   sshhosts)
     require_app
@@ -152,6 +174,24 @@ PY
   disconnect)
     require_app
     _post /disconnect; echo ;;
+
+  rdevices)
+    require_app
+    resp="$(_get /rdevices)"
+    python3 - "$resp" <<'PY'
+import json, sys
+d = json.loads(sys.argv[1])
+if d.get("error"): sys.exit(f'error: {d["error"]}')
+for dev in d.get("devices", []): print(dev)
+PY
+    ;;
+
+  attach)
+    require_app
+    dev="${1:?usage: serial attach <device> [baud]}"; baud="${2:-9600}"
+    _post /attach -H 'Content-Type: application/json' \
+      -d "$(python3 -c 'import json,sys;print(json.dumps({"device":sys.argv[1],"baud":int(sys.argv[2])}))' "$dev" "$baud")"
+    echo ;;
 
   *) echo "unknown command: $cmd" >&2; usage; exit 1 ;;
 esac

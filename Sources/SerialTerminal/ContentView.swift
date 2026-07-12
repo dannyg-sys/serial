@@ -3,6 +3,7 @@ import SwiftUI
 struct ContentView: View {
     @EnvironmentObject var session: SerialSession
     @State private var showOpen = false
+    @State private var showAttach = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -19,6 +20,9 @@ struct ContentView: View {
                          : session.connectionLabel)
         .sheet(isPresented: $showOpen) {
             OpenConnectionSheet().environmentObject(session)
+        }
+        .sheet(isPresented: $showAttach) {
+            AttachDeviceSheet().environmentObject(session)
         }
         .onAppear {
             // Prompt for a connection on launch if nothing is open.
@@ -55,6 +59,11 @@ struct ContentView: View {
                 Toggle("Auto", isOn: $session.autoSyncSize)
                     .toggleStyle(.checkbox)
                     .help("Auto-send the terminal size on connect/resize")
+            }
+
+            if session.isConnected && !session.connectionIsSerial {
+                Button("Attach Device…") { showAttach = true }
+                    .help("Discover and bridge a serial device on the connected SSH host")
             }
 
             Button("Clear") { session.clearTerminal() }

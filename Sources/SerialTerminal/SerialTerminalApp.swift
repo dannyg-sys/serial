@@ -22,17 +22,46 @@ struct SerialTerminalApp: App {
 
     var body: some Scene {
         WindowGroup("Serial Terminal") {
-            ContentView()
-                .environmentObject(appDelegate.session)
+            RootView()
         }
         .windowResizability(.contentMinSize)
     }
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
-    let session = SerialSession()
-    private lazy var server = ControlServer(session: session, port: 8765)
+/// Per-window root. Each window creates its own session + control server, so
+/// windows are fully independent connections (File ▸ New Window = Cmd-N).
+struct RootView: View {
+    @StateObject private var host = WindowHost()
+    var body: some View {
+        ContentView().environmentObject(host.session)
+    }
+}
 
+/// Owns one window's session and its control server; frees the port on close.
+final class WindowHost: ObservableObject {
+    let session: SerialSession
+    let port: UInt16
+    private let server: ControlServer
+
+    init() {
+        let p = SessionRegistry.shared.allocatePort()
+        let s = SerialSession()
+        s.httpPort = p
+        session = s
+        port = p
+        server = ControlServer(session: s, port: p)
+        server.start()
+        SessionRegistry.shared.register(port: p, session: s)
+    }
+
+    deinit {
+        server.stop()
+        session.disconnect()
+        SessionRegistry.shared.unregister(port: port)
+    }
+}
+
+final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
@@ -40,15 +69,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
            let img = NSImage(contentsOf: url) {
             NSApp.applicationIconImage = img
         }
-        server.start()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ app: NSApplication) -> Bool {
         true
-    }
-
-    func applicationWillTerminate(_ notification: Notification) {
-        server.stop()
-        session.disconnect()
     }
 }

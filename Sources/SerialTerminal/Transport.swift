@@ -150,6 +150,15 @@ final class SSHTransport: NSObject, Transport, LocalProcessDelegate {
         return Self.bridgeCommand(dev: params.devicePath, baud: params.baud)
     }
 
+    /// Non-`exec` bridge for running *inside* an existing remote shell — when it
+    /// ends (Ctrl-C / device EOF) the user drops back to the shell rather than the
+    /// SSH session closing. Prefers `socat`; `cat` fallback is read-only.
+    static func inShellBridge(dev: String, baud: Int) -> String {
+        "stty -F \(dev) \(baud) raw -echo -echoe -echok 2>/dev/null; "
+        + "if command -v socat >/dev/null 2>&1; then socat -,raw,echo=0 \(dev),b\(baud),raw,echo=0; "
+        + "else echo '[socat not found — read-only via cat]'; cat \(dev); fi"
+    }
+
     /// Configure the remote line, then bridge stdio <-> device. Prefers `socat`;
     /// falls back to `stty` + `cat` if socat isn't installed.
     static func bridgeCommand(dev: String, baud: Int) -> String {

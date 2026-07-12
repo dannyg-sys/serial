@@ -97,6 +97,14 @@ final class ControlServer {
         case ("GET", "/status"):
             return json(statusDict())
 
+        case ("GET", "/sessions"):
+            let list = SessionRegistry.shared.list().map { info -> [String: Any] in
+                ["port": Int(info.port),
+                 "label": info.label.isEmpty ? "(not connected)" : info.label,
+                 "connected": info.connected]
+            }
+            return json(["sessions": list, "thisPort": Int(port)])
+
         case ("GET", "/read"):
             let offset = Int(req.query["offset"] ?? "") ?? 0
             let r = session.read(fromOffset: offset)
@@ -119,6 +127,30 @@ final class ControlServer {
         case ("POST", "/disconnect"):
             session.disconnect()
             return json(["ok": true, "connected": false])
+
+        case ("GET", "/rdevices"):
+            guard session.statusSnapshot().kind == "ssh" else {
+                return json(["devices": [], "error": "not an ssh session"])
+            }
+            let sem = DispatchSemaphore(value: 0)
+            var result: [String] = []
+            session.listRemoteDevices { d in result = d; sem.signal() }
+            _ = sem.wait(timeout: .now() + 4)
+            return json(["devices": result])
+
+        case ("POST", "/attach"):
+            let obj = (try? JSONSerialization.jsonObject(with: req.body)) as? [String: Any] ?? [:]
+            guard session.statusSnapshot().kind == "ssh" else {
+                return ("409 Conflict", "application/json",
+                        Data(#"{"error":"not an ssh session"}"#.utf8))
+            }
+            guard let dev = obj["device"] as? String, !dev.isEmpty else {
+                return ("400 Bad Request", "application/json",
+                        Data(#"{"error":"no device"}"#.utf8))
+            }
+            let b = (obj["baud"] as? Int) ?? Int(obj["baud"] as? String ?? "") ?? 9600
+            session.attachRemoteDevice(dev: dev, baud: b)
+            return json(["ok": true, "attached": dev, "baud": b])
 
         default:
             return (
@@ -256,6 +288,7 @@ final class ControlServer {
         """
         Serial Terminal control API (loopback only)
 
+          GET  /sessions         list all open windows (port + connection label)
           GET  /ports            list /dev/cu.* devices
           GET  /sshhosts         list ~/.ssh/config host aliases
           GET  /status           connection + settings + byte counters
@@ -264,6 +297,8 @@ final class ControlServer {
           POST /connect          serial: {port,baud,dataBits,parity,stopBits}
                                  ssh:    {type:"ssh",host,device?,baud?,command?}
           POST /disconnect       close the connection
+          GET  /rdevices         (ssh) list remote serial devices
+          POST /attach           (ssh) bridge a remote device {device,baud}
 
         Use the `serial` skill helper instead of raw curl when possible.
         """
