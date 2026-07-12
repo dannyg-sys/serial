@@ -157,11 +157,14 @@ final class SSHTransport: NSObject, Transport, LocalProcessDelegate {
         return Self.bridgeCommand(dev: params.devicePath, baud: params.baud)
     }
 
-    /// Short, single-line bridge to run *inside* the existing remote shell (kept
-    /// brief so an interactive line editor doesn't wrap/mangle it). Ctrl-C returns
-    /// to the shell. Requires `socat` on the remote.
+    /// Single-line bridge to run *inside* the existing remote shell. Portable:
+    /// `stty … < dev` configures the line on both Linux and macOS/BSD (no `-F`),
+    /// prefers `socat`, and falls back to a `cat`-based bridge when socat is
+    /// missing. Ctrl-C returns to the shell.
     static func inShellBridge(dev: String, baud: Int) -> String {
-        "stty -F \(dev) \(baud) raw -echo 2>/dev/null; socat -,raw,echo=0 \(dev),b\(baud),raw,echo=0"
+        "stty \(baud) raw -echo < \(dev) 2>/dev/null; "
+        + "if command -v socat >/dev/null 2>&1; then socat -,raw,echo=0 \(dev),b\(baud),raw,echo=0; "
+        + "else cat \(dev) & __c=$!; cat > \(dev); kill $__c 2>/dev/null; fi"
     }
 
     /// Out-of-band device discovery: a separate non-interactive `ssh host find …`.
