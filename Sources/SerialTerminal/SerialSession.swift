@@ -296,7 +296,9 @@ final class SerialSession: ObservableObject {
             self.captureBuf = ""
             self.captureActive = true
             self.captureCompletion = completion
-            let ls = "ls -1 /dev/serial/by-id/* /dev/ttyUSB* /dev/ttyACM* /dev/ttyAMA* 2>/dev/null"
+            // Linux (ttyUSB/ACM/AMA, serial/by-id) and macOS/BSD (cu.*, tty.usb*).
+            let ls = "ls -1 /dev/serial/by-id/* /dev/ttyUSB* /dev/ttyACM* /dev/ttyAMA* "
+                + "/dev/tty.usb* /dev/cu.usb* /dev/cu.* 2>/dev/null"
             let line = " printf '\\n\(self.captureBegin)\\n'; \(ls); printf '\(self.captureEnd)\\n'\n"
             _ = try? self.send(Data(line.utf8))
             DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in

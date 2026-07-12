@@ -49,7 +49,8 @@ struct AttachDeviceSheet: View {
             }
 
             if scanned && devices.isEmpty {
-                Text("No /dev/ttyUSB*, ttyACM*, or serial/by-id devices found on the host.")
+                Text("No serial devices found (ttyUSB*/ttyACM*/serial-by-id on Linux, "
+                     + "cu.*/tty.usb* on macOS).")
                     .font(.caption).foregroundStyle(.orange)
             }
 
