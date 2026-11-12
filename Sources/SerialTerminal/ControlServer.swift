@@ -124,6 +124,9 @@ final class ControlServer {
         case ("POST", "/connect"):
             return doConnect(req)
 
+        case ("POST", "/hid"):
+            return doHID(req)
+
         case ("POST", "/disconnect"):
             session.disconnect()
             return json(["ok": true, "connected": false])
@@ -185,7 +188,46 @@ final class ControlServer {
         }
         do {
             let n = try session.send(payload)
+            if session.statusSnapshot().kind == "hid" {
+                // Typing is paced (~30 chars/s): answer once the dongle confirmed it all.
+                let typed = session.waitForHIDIdle(timeout: 30 + Double(payload.count) * 0.3)
+                return json(["ok": typed, "written": n, "typed": typed])
+            }
             return json(["ok": true, "written": n])
+        } catch {
+            return ("500 Internal Server Error", "application/json",
+                    Data("{\"error\":\(jsonString("\(error)"))}".utf8))
+        }
+    }
+
+    /// HID bridge extras that have no byte form: {key}, {combo}, {delay}, {layout}.
+    /// Several may be given; they are sent in that order and confirmed by the dongle.
+    private func doHID(_ req: HTTPRequest) -> (String, String, Data) {
+        let obj = (try? JSONSerialization.jsonObject(with: req.body)) as? [String: Any] ?? [:]
+        guard session.statusSnapshot().kind == "hid", session.connectedNow else {
+            return ("409 Conflict", "application/json",
+                    Data(#"{"error":"not an hid session"}"#.utf8))
+        }
+        var msgs: [HIDMessage] = []
+        if let k = (obj["key"] as? String)?.lowercased(), !k.isEmpty {
+            // The dongle silently ignores names it doesn't know, so check here.
+            guard HIDMessage.knownKeys.contains(k) else {
+                return ("400 Bad Request", "application/json",
+                        Data("{\"error\":\(jsonString("unknown key '\(k)' — use one of: " + HIDMessage.knownKeys.sorted().joined(separator: ", ")))}".utf8))
+            }
+            msgs.append(.key(k))
+        }
+        if let c = obj["combo"] as? String, !c.isEmpty { msgs.append(.combo(c.lowercased())) }
+        if let d = obj["delay"] as? Int { msgs.append(.config("delay=\(max(0, min(d, 500)))")) }
+        if let l = obj["layout"] as? String, !l.isEmpty { msgs.append(.config("layout=\(l.lowercased())")) }
+        guard !msgs.isEmpty else {
+            return ("400 Bad Request", "application/json",
+                    Data(#"{"error":"give key, combo, delay or layout"}"#.utf8))
+        }
+        do {
+            for m in msgs { try session.sendHID(m) }
+            let typed = session.waitForHIDIdle(timeout: 30)
+            return json(["ok": typed, "sent": msgs.count, "typed": typed])
         } catch {
             return ("500 Internal Server Error", "application/json",
                     Data("{\"error\":\(jsonString("\(error)"))}".utf8))
@@ -195,6 +237,19 @@ final class ControlServer {
     private func doConnect(_ req: HTTPRequest) -> (String, String, Data) {
         let obj = (try? JSONSerialization.jsonObject(with: req.body)) as? [String: Any] ?? [:]
         let type = (obj["type"] as? String)?.lowercased() ?? "serial"
+
+        if type == "hid" {
+            var p = HIDParams()
+            p.name = (obj["name"] as? String) ?? ""
+            do {
+                try session.connect(.hid(p))
+                // The BLE link comes up in the background; /status reports "linked".
+                return json(["ok": true, "connected": true, "kind": "hid"])
+            } catch {
+                return ("500 Internal Server Error", "application/json",
+                        Data("{\"error\":\(jsonString("\(error)"))}".utf8))
+            }
+        }
 
         func baud(_ dflt: Int) -> Int {
             if let b = obj["baud"] as? Int { return b }
@@ -249,6 +304,7 @@ final class ControlServer {
     private func statusDict() -> [String: Any] {
         let s = session.statusSnapshot()
         return [
+            "linked": session.hidLinked.map { $0 as Any } ?? NSNull(),   // hid: BLE link up?
             "connected": s.connected,
             "kind": s.kind,
             "label": s.label,
@@ -296,6 +352,9 @@ final class ControlServer {
           POST /write            body: raw bytes, or JSON {text,newline,base64}
           POST /connect          serial: {port,baud,dataBits,parity,stopBits}
                                  ssh:    {type:"ssh",host,device?,baud?,command?}
+                                 hid:    {type:"hid",name?}  BLE keyboard-bridge dongle
+          POST /hid              (hid) {key|combo|delay|layout}  e.g. {"key":"enter"},
+                                 {"combo":"ctrl+alt+t"}, {"delay":40}; /write types text
           POST /disconnect       close the connection
           GET  /rdevices         (ssh) list remote serial devices
           POST /attach           (ssh) bridge a remote device {device,baud}

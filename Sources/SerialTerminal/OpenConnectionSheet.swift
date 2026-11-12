@@ -84,19 +84,36 @@ struct OpenConnectionSheet: View {
         }
     }
 
+    /// Pseudo-port for the BLE HID keyboard bridge (listed under Bluetooth).
+    private static let hidEntry = "hid://t-dongle"
+
     private var serialPane: some View {
-        let list = ports.filter { categoryOf($0) == category }
+        var list = ports.filter { categoryOf($0) == category }
+        if category == .bluetooth { list.insert(Self.hidEntry, at: 0) }
         return VStack(alignment: .leading, spacing: 0) {
             if list.isEmpty {
                 centeredEmpty("No Devices Available")
             } else {
                 List(list, id: \.self, selection: $selectedPort) { p in
-                    Label(p.replacingOccurrences(of: "/dev/", with: ""),
-                          systemImage: "cable.connector")
-                        .tag(p)
+                    if p == Self.hidEntry {
+                        Label("T-Dongle HID bridge — type into a TV / headless box",
+                              systemImage: "keyboard")
+                            .tag(p)
+                    } else {
+                        Label(p.replacingOccurrences(of: "/dev/", with: ""),
+                              systemImage: "cable.connector")
+                            .tag(p)
+                    }
                 }
                 Divider()
-                settingsRow
+                if selectedPort == Self.hidEntry {
+                    Text("Finds the dongle over Bluetooth. What you type in the terminal is "
+                         + "typed as a USB keyboard on the device it is plugged into.")
+                        .font(.callout).foregroundStyle(.secondary)
+                        .padding(10)
+                } else {
+                    settingsRow
+                }
             }
         }
     }
@@ -242,6 +259,11 @@ struct OpenConnectionSheet: View {
                 try session.connect(.ssh(p))
             default:
                 guard let path = selectedPort else { return }
+                if path == Self.hidEntry {
+                    try session.connect(.hid(HIDParams()))
+                    dismiss()
+                    return
+                }
                 let s = SerialSettings(baud: ContentView.parseBaud(baud) ?? 9600,
                                        dataBits: dataBits, parity: parity, stopBits: stopBits)
                 try session.connect(.serial(path: path, settings: s))

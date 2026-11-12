@@ -67,7 +67,7 @@ struct ContentView: View {
                     .help("Auto-send the terminal size on connect/resize")
             }
 
-            if session.isConnected && !session.connectionIsSerial {
+            if session.isConnected && session.connectionKind == "ssh" {
                 Button("Attach Device…") { showAttach = true }
                     .help("Discover and bridge a serial device on the connected SSH host")
             }

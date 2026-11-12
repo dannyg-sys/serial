@@ -19,6 +19,7 @@ final class SerialSession: ObservableObject {
     @Published var httpPort: UInt16 = 8765
     @Published var connectionLabel: String = "" // e.g. "ssh pos_scangle · /dev/ttyUSB0"; drives window title
     @Published var connectionIsSerial = false   // true for local serial (enables Send Size / Auto)
+    @Published var connectionKind = "none"      // "serial" | "ssh" | "hid" | "none"
     @Published var termCols: Int = 80          // live emulator size (from SwiftTerm)
     @Published var termRows: Int = 24
     @Published var autoSyncSize: Bool = true   // auto-send stty size on connect/resize
@@ -130,6 +131,7 @@ final class SerialSession: ObservableObject {
         switch spec {
         case .serial(let path, let s): newSettings = s; portPath = path
         case .ssh(let p): newSettings.baud = p.baud; host = p.host
+        case .hid: break
         }
 
         stateLock.lock()
@@ -146,7 +148,9 @@ final class SerialSession: ObservableObject {
         let label = t.label
         let manualWin = t.needsManualWindowSize
         let isSerial = spec.kind == "serial"
+        let kind = spec.kind
         onMain {
+            self.connectionKind = kind
             self.settings = newSettings
             if let portPath { self.selectedPort = portPath }
             self.connectedPort = portPath ?? host
@@ -177,8 +181,39 @@ final class SerialSession: ObservableObject {
             return SSHTransport(params: p, windowSize: { [weak self] in
                 (cols: self?.termCols ?? 80, rows: self?.termRows ?? 24)
             })
+        case .hid(let p):
+            return HIDBridgeTransport(params: p)
         }
     }
+
+    // MARK: - HID bridge extras
+
+    private var hidTransport: HIDBridgeTransport? {
+        portLock.lock(); defer { portLock.unlock() }
+        return transport as? HIDBridgeTransport
+    }
+
+    /// Send a key / combo / config message (HID sessions only).
+    func sendHID(_ message: HIDMessage) throws {
+        guard let h = hidTransport else { throw SerialError.notOpen }
+        try h.send(message)
+    }
+
+    /// Block until everything queued for the dongle has been typed (false on
+    /// timeout). Returns true at once for non-HID sessions.
+    func waitForHIDIdle(timeout: TimeInterval) -> Bool {
+        hidTransport?.waitUntilIdle(timeout: timeout) ?? true
+    }
+
+    /// Keystrokes from the terminal view. An HID bridge whose dongle is plugged
+    /// into this very Mac refuses them (they would loop back into this window).
+    func sendFromKeyboard(_ data: Data) {
+        if let h = hidTransport, h.refuseKeyboardInput() { return }
+        _ = try? send(data)
+    }
+
+    /// BLE link state of an HID session (nil for other kinds).
+    var hidLinked: Bool? { hidTransport?.isLinked }
 
     func disconnect() {
         portLock.lock()
@@ -194,6 +229,7 @@ final class SerialSession: ObservableObject {
             self.connectedPort = nil
             self.connectionLabel = ""
             self.connectionIsSerial = false
+            self.connectionKind = "none"
             self.feedText("[ disconnected ]")
         }
     }
@@ -253,6 +289,7 @@ final class SerialSession: ObservableObject {
             self.connectedPort = nil
             self.connectionLabel = ""
             self.connectionIsSerial = false
+            self.connectionKind = "none"
             self.lastError = reason
             self.feedText("[ port closed\(reason.map { ": \($0)" } ?? "") ]")
         }

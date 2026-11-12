@@ -21,6 +21,8 @@ echo "Assembling ${APP}..."
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN_PATH" "$APP/Contents/MacOS/$BIN_NAME"
+# MCP shim for Claude Desktop (stdio → the app's loopback API).
+cp "$(dirname "$BIN_PATH")/SerialMCP" "$APP/Contents/MacOS/serial-mcp"
 
 # App icon (build it if missing).
 if [[ ! -f Resources/AppIcon.icns ]]; then
@@ -44,6 +46,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleShortVersionString</key> <string>1.0</string>
   <key>LSMinimumSystemVersion</key>  <string>13.0</string>
   <key>NSHighResolutionCapable</key> <true/>
+  <key>NSBluetoothAlwaysUsageDescription</key> <string>Serial Terminal uses Bluetooth to send keystrokes to the HID keyboard bridge dongle.</string>
   <key>LSApplicationCategoryType</key> <string>public.app-category.developer-tools</string>
 </dict>
 </plist>

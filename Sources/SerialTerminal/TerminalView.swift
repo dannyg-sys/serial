@@ -45,7 +45,7 @@ struct SwiftTermView: NSViewRepresentable {
         // Bytes produced by the keyboard → write to the serial port.
         func send(source: TerminalView, data: ArraySlice<UInt8>) {
             guard session.connectedNow else { return }
-            try? session.send(Data(data))
+            session.sendFromKeyboard(Data(data))
         }
 
         func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {

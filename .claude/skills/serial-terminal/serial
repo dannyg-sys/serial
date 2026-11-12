@@ -36,6 +36,13 @@ serial — control the SerialTerminal.app over its loopback API
                              open/reconfigure the port (parity: none|even|odd)
   serial disconnect          close the port
 
+ HID keyboard bridge (Bluetooth dongle that types as a USB keyboard on its host):
+  serial hid [name]          connect to the dongle and wait for the link; after that
+                             send / sendraw TYPE the text on the device it is plugged into
+  serial key <name>          press enter|tab|esc|space|backspace|delete|up|down|left|right|home|end
+  serial combo <combo>       press a combination, e.g. ctrl+c, ctrl+alt+t, alt+tab
+  serial keydelay <ms>       gap between keystrokes (default 20 = about 30 chars/s)
+
 Env: SERIAL_API_PORT (default 8765)
 EOF
 }
@@ -174,6 +181,33 @@ PY
   disconnect)
     require_app
     _post /disconnect; echo ;;
+
+  hid)
+    require_app
+    name="${1:-}"
+    _post /connect -H 'Content-Type: application/json' \
+      -d "$(python3 -c 'import json,sys;d={"type":"hid"};n=sys.argv[1];d.update({"name":n} if n else {});print(json.dumps(d))' "$name")" >/dev/null
+    # The Bluetooth link comes up in the background — wait for it (up to ~25s).
+    for _ in $(seq 1 25); do
+      sleep 1
+      state="$(python3 -c 'import json,sys;d=json.loads(sys.argv[1]);print("linked" if d.get("linked") else ("wait" if d.get("connected") else "closed"))' "$(_get /status)")"
+      [[ "$state" == "linked" ]] && { echo "linked to the dongle"; exit 0; }
+      [[ "$state" == "closed" ]] && break
+    done
+    echo "error: could not link to the dongle" >&2
+    _get "/read?offset=0" | python3 -c 'import json,sys;sys.stderr.write(json.load(sys.stdin).get("text","")+"\n")'
+    exit 1 ;;
+
+  key|combo|keydelay)
+    require_app
+    arg="${1:?usage: serial $cmd <value>}"
+    case "$cmd" in
+      key)      body="$(python3 -c 'import json,sys;print(json.dumps({"key":sys.argv[1]}))' "$arg")" ;;
+      combo)    body="$(python3 -c 'import json,sys;print(json.dumps({"combo":sys.argv[1]}))' "$arg")" ;;
+      keydelay) body="$(python3 -c 'import json,sys;print(json.dumps({"delay":int(sys.argv[1])}))' "$arg")" ;;
+    esac
+    # No -f here so the API's own error text (e.g. unknown key) is shown.
+    curl -sS -X POST "${BASE}/hid" -H 'Content-Type: application/json' -d "$body"; echo ;;
 
   rdevices)
     require_app

@@ -44,9 +44,14 @@ struct RemoteScan {
 enum ConnectionSpec {
     case serial(path: String, settings: SerialSettings)
     case ssh(SSHParams)
+    case hid(HIDParams)
 
     var kind: String {
-        switch self { case .serial: return "serial"; case .ssh: return "ssh" }
+        switch self {
+        case .serial: return "serial"
+        case .ssh:    return "ssh"
+        case .hid:    return "hid"
+        }
     }
 }
 

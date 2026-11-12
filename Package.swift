@@ -19,6 +19,11 @@ let package = Package(
             resources: [
                 .process("Resources")
             ]
+        ),
+        // stdio MCP shim for Claude Desktop: forwards tool calls to the app's loopback API.
+        .executableTarget(
+            name: "SerialMCP",
+            path: "Sources/SerialMCP"
         )
     ]
 )
