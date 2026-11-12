@@ -52,6 +52,11 @@ struct OpenConnectionSheet: View {
         }
         .frame(width: 740, height: 470)
         .onAppear(perform: load)
+        // Look for HID bridge dongles only while the Bluetooth section is showing.
+        .onChange(of: category) { c in
+            if c == .bluetooth { scanner.start() } else { scanner.stop() }
+        }
+        .onDisappear { scanner.stop() }
     }
 
     // MARK: - Sidebar
@@ -126,8 +131,6 @@ struct OpenConnectionSheet: View {
                 }
             }
         }
-        .onAppear { if category == .bluetooth { scanner.start() } }
-        .onDisappear { scanner.stop() }
     }
 
     private var settingsRow: some View {
