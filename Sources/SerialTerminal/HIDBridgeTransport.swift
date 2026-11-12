@@ -7,7 +7,9 @@ import IOKit
 /// Whatever is written to this transport is typed on the device the dongle is
 /// plugged into.
 struct HIDParams: Equatable {
-    var name: String = ""      // optional: only link to a dongle advertising this name
+    /// Which dongle: its advertised name ("T-Dongle HID F0A8") or just the id
+    /// ("F0A8"). Empty = the only one in range; refused if there are several.
+    var name: String = ""
 }
 
 /// One message of the dongle protocol (first byte = opcode).
@@ -181,13 +183,38 @@ final class HIDBridgeTransport: NSObject, Transport, CBCentralManagerDelegate, C
     private var ackTimer: DispatchWorkItem?
     private var scanTimer: DispatchWorkItem?
     private var lastDropNotice = Date.distantPast
+    /// Dongles seen in the current scan, and the one we settled on.
+    private var candidates: [UUID: (p: CBPeripheral, name: String)] = [:]
+    private var settleTimer: DispatchWorkItem?
+    private var wanted: String                  // name/id to link to ("" = the only one)
+    private var chosenName = ""
+    private var guardCache: (at: Date, local: Bool)?
     /// One enter per queued message, one leave when it is confirmed or dropped.
     private let work = DispatchGroup()
 
-    init(params: HIDParams) { self.params = params }
+    init(params: HIDParams) {
+        self.params = params
+        self.wanted = params.name.trimmingCharacters(in: .whitespaces)
+    }
 
     /// Whether the BLE link is up right now (safe from any thread but `q`).
     var isLinked: Bool { q.sync { linked } }
+    /// Advertised name of the dongle we are (or were last) linked to.
+    var dongleName: String { q.sync { chosenName } }
+
+    /// `wanted` may be the full advertised name or just its trailing id.
+    static func matches(_ advertised: String, wanted: String) -> Bool {
+        let a = advertised.lowercased()
+        let w = wanted.lowercased().trimmingCharacters(in: .whitespaces)
+        return w.isEmpty || a == w || a.hasSuffix(" " + w)
+    }
+
+    /// The 4-hex-digit id at the end of a dongle name (= tail of its USB serial).
+    static func idSuffix(of name: String) -> String? {
+        guard let last = name.split(separator: " ").last, last.count == 4,
+              last.allSatisfy({ $0.isHexDigit }) else { return nil }
+        return last.uppercased()
+    }
 
     // MARK: Transport
 
@@ -214,10 +241,12 @@ final class HIDBridgeTransport: NSObject, Transport, CBCentralManagerDelegate, C
 
     // MARK: Feedback-loop guard
 
-    /// True when an Espressif USB device (the dongle's USB side) is attached to
-    /// this Mac. Then keys typed in our own window would be typed straight back
-    /// into it by the dongle and loop forever.
-    static func dongleAttachedToThisMac() -> Bool {
+    /// True when the USB side of this dongle is attached to this Mac: then keys
+    /// typed in our own window would be typed straight back into it and loop
+    /// forever. The dongle is recognised by the id in its name, which is the tail
+    /// of its USB serial number; without an id (old firmware) any Espressif USB
+    /// device counts.
+    static func dongleAttachedToThisMac(idSuffix: String?) -> Bool {
         guard let matching = IOServiceMatching("IOUSBHostDevice") as NSMutableDictionary? else {
             return false
         }
@@ -227,16 +256,30 @@ final class HIDBridgeTransport: NSObject, Transport, CBCentralManagerDelegate, C
             return false
         }
         defer { IOObjectRelease(iter) }
-        let dev = IOIteratorNext(iter)
-        guard dev != 0 else { return false }
-        IOObjectRelease(dev)
-        return true
+        while true {
+            let dev = IOIteratorNext(iter)
+            if dev == 0 { return false }
+            defer { IOObjectRelease(dev) }
+            guard let idSuffix else { return true }
+            let serial = IORegistryEntryCreateCFProperty(dev, "USB Serial Number" as CFString,
+                                                         kCFAllocatorDefault, 0)?
+                .takeRetainedValue() as? String ?? ""
+            if serial.uppercased().filter({ $0.isHexDigit }).hasSuffix(idSuffix) { return true }
+        }
     }
 
     /// Called for keystrokes coming from the terminal view. Returns true (and
     /// says why in the terminal) when they must not be sent.
     func refuseKeyboardInput() -> Bool {
-        guard Self.dongleAttachedToThisMac() else { return false }
+        let (name, cached) = q.sync { (chosenName, guardCache) }
+        let local: Bool
+        if let cached, Date().timeIntervalSince(cached.at) < 2 {
+            local = cached.local
+        } else {
+            local = Self.dongleAttachedToThisMac(idSuffix: Self.idSuffix(of: name))
+            q.async { [weak self] in self?.guardCache = (Date(), local) }
+        }
+        guard local else { return false }
         q.async { [weak self] in
             guard let self, Date().timeIntervalSince(self.lastDropNotice) > 3 else { return }
             self.lastDropNotice = Date()
@@ -313,6 +356,8 @@ final class HIDBridgeTransport: NSObject, Transport, CBCentralManagerDelegate, C
 
     private func teardown() {
         scanTimer?.cancel(); scanTimer = nil
+        settleTimer?.cancel(); settleTimer = nil
+        candidates.removeAll()
         dropAll()
         central?.stopScan()
         if let p = peripheral { central?.cancelPeripheralConnection(p) }
@@ -335,11 +380,18 @@ final class HIDBridgeTransport: NSObject, Transport, CBCentralManagerDelegate, C
 
     private func startScan() {
         guard isOpen, let central, central.state == .poweredOn else { return }
-        central.scanForPeripherals(withServices: [Self.serviceUUID])
+        candidates.removeAll()
+        settleTimer?.cancel(); settleTimer = nil
+        // Duplicates on, so a name that arrives in a later packet is still seen.
+        central.scanForPeripherals(withServices: [Self.serviceUUID],
+                                   options: [CBCentralManagerScanOptionAllowDuplicatesKey: true])
         scanTimer?.cancel(); scanTimer = nil
         guard !everLinked else { return }      // after a drop, keep waiting for it to return
         let t = DispatchWorkItem { [weak self] in
-            self?.fail("dongle not found — is it plugged in and powered?")
+            guard let self else { return }
+            self.fail(self.wanted.isEmpty
+                      ? "dongle not found — is it plugged in and powered?"
+                      : "dongle '\(self.wanted)' not found — is it plugged in and powered?")
         }
         scanTimer = t
         q.asyncAfter(deadline: .now() + 20, execute: t)
@@ -361,14 +413,45 @@ final class HIDBridgeTransport: NSObject, Transport, CBCentralManagerDelegate, C
     func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral,
                         advertisementData: [String: Any], rssi RSSI: NSNumber) {
         guard self.peripheral == nil else { return }
-        let name = (advertisementData[CBAdvertisementDataLocalNameKey] as? String)
-            ?? peripheral.name ?? ""
-        if !params.name.isEmpty, name != params.name { return }
+        // Prefer the name in this advertisement: CoreBluetooth's cached
+        // `peripheral.name` can be stale after a firmware rename.
+        let advertised = advertisementData[CBAdvertisementDataLocalNameKey] as? String
+        let name = advertised ?? candidates[peripheral.identifier]?.name ?? peripheral.name ?? ""
+        candidates[peripheral.identifier] = (peripheral, name)
+
+        if !wanted.isEmpty {
+            // A specific dongle was asked for: take it once its real name is seen.
+            if advertised != nil, Self.matches(name, wanted: wanted) { link(peripheral, name: name) }
+            return
+        }
+        // No name given: wait briefly to see whether there is more than one.
+        guard settleTimer == nil else { return }
+        let t = DispatchWorkItem { [weak self] in self?.chooseSingle() }
+        settleTimer = t
+        q.asyncAfter(deadline: .now() + 1.5, execute: t)
+    }
+
+    /// Without a name we only link when exactly one dongle is in range — typing
+    /// into whichever happened to answer first could hit the wrong device.
+    private func chooseSingle() {
+        settleTimer = nil
+        guard peripheral == nil, isOpen else { return }
+        if candidates.count == 1, let c = candidates.values.first {
+            link(c.p, name: c.name)
+            return
+        }
+        let names = candidates.values.map { $0.name.isEmpty ? "unnamed" : $0.name }.sorted()
+        fail("several dongles in range (\(names.joined(separator: ", "))) — choose one by name")
+    }
+
+    private func link(_ p: CBPeripheral, name: String) {
         scanTimer?.cancel(); scanTimer = nil
-        central.stopScan()
-        self.peripheral = peripheral
-        peripheral.delegate = self
-        central.connect(peripheral)
+        settleTimer?.cancel(); settleTimer = nil
+        central?.stopScan()
+        chosenName = name
+        peripheral = p
+        p.delegate = self
+        central?.connect(p)
     }
 
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
@@ -417,7 +500,10 @@ final class HIDBridgeTransport: NSObject, Transport, CBCentralManagerDelegate, C
         if let error { fail("could not subscribe to the dongle: \(error.localizedDescription)"); return }
         linked = true
         everLinked = true
-        emit("linked to \(peripheral.name ?? "dongle") — what you type here is typed on the "
+        guardCache = nil
+        if chosenName.isEmpty { chosenName = peripheral.name ?? "dongle" }
+        if wanted.isEmpty { wanted = chosenName }       // after a drop, relink to this one only
+        emit("linked to \(chosenName) — what you type here is typed on the "
              + "device it is plugged into")
         pump()
     }

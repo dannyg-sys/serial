@@ -63,9 +63,10 @@ let str: [String: Any] = ["type": "string"]
 let tools: [[String: Any]] = [
     tool("sessions", "List the open Serial Terminal windows: each is one connection with its own API port."),
     tool("status", "Connection state of a window: kind (serial / ssh / hid), label, linked (hid), byte counters."),
+    tool("list_dongles", "List the HID keyboard-bridge dongles in Bluetooth range. Each name ends in a 4-character id that is also shown on the dongle's display. A dongle already linked by a window is not listed."),
     tool("connect_hid",
-         "Connect a window to the Bluetooth HID keyboard-bridge dongle. Text sent afterwards is typed as a USB keyboard on whatever device the dongle is plugged into (TV, headless box, login prompt).",
-         ["name": ["type": "string", "description": "Only link to a dongle advertising this name (optional)"]]),
+         "Connect a window to a Bluetooth HID keyboard-bridge dongle. Text sent afterwards is typed as a USB keyboard on whatever device that dongle is plugged into (TV, headless box, login prompt). If several dongles are in range a name is required: ask the user which one (the id is on its display) rather than guessing.",
+         ["name": ["type": "string", "description": "The dongle's name or just its 4-character id, e.g. F0A8"]]),
     tool("connect_serial", "Open a local serial port in a window.",
          ["device": ["type": "string", "description": "e.g. /dev/cu.usbserial-1420"],
           "baud": ["type": "integer", "description": "default 9600"]],
@@ -109,6 +110,9 @@ func call(_ name: String, _ a: [String: Any]) throws -> String {
 
     case "status":
         return pretty(try api("GET", "/status", port: port))
+
+    case "list_dongles":
+        return pretty(try api("GET", "/hiddevices", port: port)["dongles"] ?? [])
 
     case "connect_hid":
         var body: [String: Any] = ["type": "hid"]

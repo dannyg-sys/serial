@@ -58,13 +58,17 @@ Bluetooth; whatever is written to that connection is typed on the target.
 
 | Command | What it does |
 |---|---|
-| `serial hid` | connect to the dongle and wait until it is linked |
+| `serial hiddevices` | list the dongles in range; each is named `T-Dongle HID <id>` |
+| `serial hid [id]` | connect to a dongle and wait until it is linked |
 | `serial sendraw <text>` | type the text |
 | `serial send <text>` | type the text, then press Enter |
 | `serial key <name>` | enter, tab, esc, space, backspace, delete, up, down, left, right, home, end |
 | `serial combo <combo>` | e.g. `ctrl+c`, `ctrl+alt+t`, `alt+tab` |
 | `serial keydelay <ms>` | gap between keystrokes; default 20 (about 30 chars/s), raise it if the target drops characters |
 
+- There can be several dongles, each plugged into a different device. With more
+  than one in range `serial hid` without an id is refused. Never guess: the id is
+  printed on each dongle's display, so ask the user which one is in the target.
 - Typing is paced, and every command returns only once the dongle confirmed the
   keys went out (`"typed": true`). No sleep is needed between commands.
 - The link is **write-only**: you cannot see the target's screen. `serial read`

@@ -127,6 +127,13 @@ final class ControlServer {
         case ("POST", "/hid"):
             return doHID(req)
 
+        case ("GET", "/hiddevices"):
+            // Dongles advertising right now (one already linked by a window is not listed).
+            let list = HIDDongleScanner.scanOnce(seconds: 3).map { d -> [String: Any] in
+                ["name": d.name, "rssi": d.rssi]
+            }
+            return json(["dongles": list])
+
         case ("POST", "/disconnect"):
             session.disconnect()
             return json(["ok": true, "connected": false])
@@ -220,9 +227,11 @@ final class ControlServer {
         if let c = obj["combo"] as? String, !c.isEmpty { msgs.append(.combo(c.lowercased())) }
         if let d = obj["delay"] as? Int { msgs.append(.config("delay=\(max(0, min(d, 500)))")) }
         if let l = obj["layout"] as? String, !l.isEmpty { msgs.append(.config("layout=\(l.lowercased())")) }
+        // Reboot the dongle into USB flash mode (for a firmware update, no BOOT button).
+        if (obj["bootloader"] as? Bool) == true { msgs.append(.config("bootloader")) }
         guard !msgs.isEmpty else {
             return ("400 Bad Request", "application/json",
-                    Data(#"{"error":"give key, combo, delay or layout"}"#.utf8))
+                    Data(#"{"error":"give key, combo, delay, layout or bootloader"}"#.utf8))
         }
         do {
             for m in msgs { try session.sendHID(m) }
@@ -305,6 +314,7 @@ final class ControlServer {
         let s = session.statusSnapshot()
         return [
             "linked": session.hidLinked.map { $0 as Any } ?? NSNull(),   // hid: BLE link up?
+            "dongle": session.hidDongleName.map { $0 as Any } ?? NSNull(), // hid: which dongle
             "connected": s.connected,
             "kind": s.kind,
             "label": s.label,
@@ -352,9 +362,13 @@ final class ControlServer {
           POST /write            body: raw bytes, or JSON {text,newline,base64}
           POST /connect          serial: {port,baud,dataBits,parity,stopBits}
                                  ssh:    {type:"ssh",host,device?,baud?,command?}
-                                 hid:    {type:"hid",name?}  BLE keyboard-bridge dongle
-          POST /hid              (hid) {key|combo|delay|layout}  e.g. {"key":"enter"},
-                                 {"combo":"ctrl+alt+t"}, {"delay":40}; /write types text
+                                 hid:    {type:"hid",name?}  BLE keyboard-bridge dongle;
+                                         name = "T-Dongle HID F0A8" or just "F0A8",
+                                         required when several are in range
+          GET  /hiddevices       dongles advertising right now (3 s scan)
+          POST /hid              (hid) {key|combo|delay|layout|bootloader}  e.g.
+                                 {"key":"enter"}, {"combo":"ctrl+alt+t"}, {"delay":40};
+                                 /write types text
           POST /disconnect       close the connection
           GET  /rdevices         (ssh) list remote serial devices
           POST /attach           (ssh) bridge a remote device {device,baud}

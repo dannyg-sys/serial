@@ -19,6 +19,7 @@ struct OpenConnectionSheet: View {
         }
     }
 
+    @StateObject private var scanner = HIDDongleScanner()
     @State private var category: Category = .usb
     @State private var ports: [String] = []
     @State private var sshHosts: [SSHConfig.HostEntry] = []
@@ -84,19 +85,28 @@ struct OpenConnectionSheet: View {
         }
     }
 
-    /// Pseudo-port for the BLE HID keyboard bridge (listed under Bluetooth).
-    private static let hidEntry = "hid://t-dongle"
+    /// Pseudo-port prefix for an HID keyboard-bridge dongle (listed under Bluetooth).
+    private static let hidPrefix = "hid://"
 
     private var serialPane: some View {
         var list = ports.filter { categoryOf($0) == category }
-        if category == .bluetooth { list.insert(Self.hidEntry, at: 0) }
+        if category == .bluetooth {
+            // One row per dongle found by the scan, named by its id (e.g. "… F0A8").
+            var seen = Set<String>()
+            let found = scanner.dongles.map(\.name).filter { seen.insert($0).inserted }
+            list.insert(contentsOf: found.map { Self.hidPrefix + $0 }, at: 0)
+        }
         return VStack(alignment: .leading, spacing: 0) {
             if list.isEmpty {
-                centeredEmpty("No Devices Available")
+                centeredEmpty(category == .bluetooth
+                              ? (scanner.problem.isEmpty ? "Searching for HID bridge dongles…"
+                                                         : scanner.problem)
+                              : "No Devices Available")
             } else {
                 List(list, id: \.self, selection: $selectedPort) { p in
-                    if p == Self.hidEntry {
-                        Label("T-Dongle HID bridge — type into a TV / headless box",
+                    if p.hasPrefix(Self.hidPrefix) {
+                        Label(String(p.dropFirst(Self.hidPrefix.count))
+                              + " — keyboard bridge: type into a TV / headless box",
                               systemImage: "keyboard")
                             .tag(p)
                     } else {
@@ -106,9 +116,9 @@ struct OpenConnectionSheet: View {
                     }
                 }
                 Divider()
-                if selectedPort == Self.hidEntry {
-                    Text("Finds the dongle over Bluetooth. What you type in the terminal is "
-                         + "typed as a USB keyboard on the device it is plugged into.")
+                if selectedPort?.hasPrefix(Self.hidPrefix) == true {
+                    Text("What you type in the terminal is typed as a USB keyboard on the "
+                         + "device this dongle is plugged into. Its id is shown on its display.")
                         .font(.callout).foregroundStyle(.secondary)
                         .padding(10)
                 } else {
@@ -116,6 +126,8 @@ struct OpenConnectionSheet: View {
                 }
             }
         }
+        .onAppear { if category == .bluetooth { scanner.start() } }
+        .onDisappear { scanner.stop() }
     }
 
     private var settingsRow: some View {
@@ -259,8 +271,9 @@ struct OpenConnectionSheet: View {
                 try session.connect(.ssh(p))
             default:
                 guard let path = selectedPort else { return }
-                if path == Self.hidEntry {
-                    try session.connect(.hid(HIDParams()))
+                if path.hasPrefix(Self.hidPrefix) {
+                    scanner.stop()          // free the radio before the session scans
+                    try session.connect(.hid(HIDParams(name: String(path.dropFirst(Self.hidPrefix.count)))))
                     dismiss()
                     return
                 }

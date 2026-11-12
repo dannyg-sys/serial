@@ -214,6 +214,8 @@ final class SerialSession: ObservableObject {
 
     /// BLE link state of an HID session (nil for other kinds).
     var hidLinked: Bool? { hidTransport?.isLinked }
+    /// Name of the dongle an HID session settled on (empty until one is chosen).
+    var hidDongleName: String? { hidTransport?.dongleName }
 
     func disconnect() {
         portLock.lock()

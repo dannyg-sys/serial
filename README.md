@@ -75,8 +75,12 @@ Open another with **⌘N**. The status bar shows that window's API port.
 For devices with no keyboard and no network (a TV browser, a login prompt, a
 headless box): a LilyGO T-Dongle-S3 running the
 [t-dongle-hid-bridge](../t-dongle-hid-bridge) firmware plugs into the target's
-USB port and shows up there as a keyboard. Pick **Bluetooth ▸ T-Dongle HID
-bridge** in the picker; the app finds the dongle and links to it.
+USB port and shows up there as a keyboard. The picker's **Bluetooth** section
+lists the dongles in range; pick one and the app links to it.
+
+- Each dongle is named `T-Dongle HID <id>`; the id is on its display, so with
+  several sticks you choose the right one. From the API or skill, connecting
+  without a name is refused when more than one is in range.
 
 - Whatever you type in the terminal is typed on the target, including arrows,
   Tab, Esc, Backspace and Ctrl-combinations. Paste works the same way.
@@ -86,9 +90,11 @@ bridge** in the picker; the app finds the dongle and links to it.
 - ASCII only, US keyboard layout on the target.
 - If the dongle is unplugged (e.g. moved to another device) the app waits and
   relinks by itself. Input typed while unlinked is dropped, not queued.
-- If the dongle's USB side is plugged into this same Mac, keyboard input from the
-  terminal is refused: it would be typed straight back into the window in a loop.
-  The API can still type (useful for testing into another app).
+- If the linked dongle's USB side is plugged into this same Mac, keyboard input
+  from the terminal is refused: it would be typed straight back into the window
+  in a loop. The API can still type (useful for testing into another app).
+- `serial flashmode` reboots the linked dongle into USB flash mode for a firmware
+  update; after flashing it restarts and the app relinks.
 - First use asks for Bluetooth permission. The app is ad-hoc signed, so macOS may
   ask again after a rebuild.
 
@@ -120,7 +126,8 @@ $serial attach /dev/ttyUSB0 9600       # bridge a remote device
 $serial ssh pos_scangle /dev/ttyUSB0 9600   # connect + attach in one step
 
 # HID keyboard bridge
-$serial hid                            # link to the dongle
+$serial hiddevices                     # dongles in range
+$serial hid F0A8                       # link to one (id optional if only one)
 $serial send "https://example.com"     # type it, then Enter
 $serial sendraw "admin"; $serial key tab
 $serial combo ctrl+alt+t
@@ -140,7 +147,7 @@ Claude, the GUI and the skill all share the one link. Add it to
 }
 ```
 
-Tools: `sessions`, `status`, `connect_serial`, `connect_ssh`, `connect_hid`,
+Tools: `sessions`, `status`, `connect_serial`, `connect_ssh`, `list_dongles`, `connect_hid`,
 `disconnect`, `read`, `write`, and for the HID bridge `press_key`, `send_combo`,
 `set_key_delay`. All take an optional `port` to address a specific window. The
 app must be running; the shim says so if it is not.
@@ -154,8 +161,9 @@ app must be running; the shim says so if it is not.
 | GET | `/sshhosts` | | `~/.ssh/config` host aliases |
 | GET | `/read` | `?offset=N` | bytes since offset N (`text` + `base64`) |
 | POST | `/write` | raw body, or `{text,newline,base64}` | on hid: types the text and answers when done (`typed`) |
-| POST | `/connect` | serial: `{port,baud,dataBits,parity,stopBits}` · ssh: `{type:"ssh",host,device?,baud?,command?}` · hid: `{type:"hid",name?}` | hid links in the background; `/status` has `linked` |
-| POST | `/hid` | `{key}` · `{combo}` · `{delay}` · `{layout}` | (hid) special key, combination, key gap in ms, target layout |
+| POST | `/connect` | serial: `{port,baud,dataBits,parity,stopBits}` · ssh: `{type:"ssh",host,device?,baud?,command?}` · hid: `{type:"hid",name?}` | hid links in the background; `/status` has `linked` and `dongle`. `name` is the dongle's name or id, required when several are in range |
+| GET | `/hiddevices` | | dongles advertising right now (3 s scan): `{dongles:[{name,rssi}]}` |
+| POST | `/hid` | `{key}` · `{combo}` · `{delay}` · `{layout}` · `{bootloader:true}` | (hid) special key, combination, key gap in ms, target layout, reboot into flash mode |
 | POST | `/disconnect` | | |
 | GET | `/rdevices` | | (ssh) `{devices,hasSocat}` |
 | POST | `/attach` | `{device,baud}` | (ssh) bridge a remote device |
